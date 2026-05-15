@@ -1,0 +1,81 @@
+#pragma kernel CullAndCompact
+
+struct ChunkData
+{
+    float3 center;
+    int firstRange;
+    float3 extents;
+    int rangeCount;
+};
+
+struct RangeData
+{
+    int materialIndex;
+    int startInstance;
+    int instanceCount;
+    int padding;
+};
+
+StructuredBuffer<ChunkData> _Chunks;
+StructuredBuffer<RangeData> _Ranges;
+AppendStructuredBuffer<uint> _VisibleInstanceIndices;
+
+float4 _FrustumPlanes[6];
+float3 _CameraPosition;
+float _MaxDrawDistanceSquared;
+int _ChunkCount;
+int _MaterialIndex;
+
+bool IsAABBVisible(float3 center, float3 extents)
+{
+    [unroll]
+    for (int i = 0; i < 6; i++)
+    {
+        float3 normal = _FrustumPlanes[i].xyz;
+        float radius = dot(extents, abs(normal));
+        float distance = dot(normal, center) + _FrustumPlanes[i].w;
+
+        if (distance + radius < 0.0)
+            return false;
+    }
+
+    return true;
+}
+
+[numthreads(64, 1, 1)]
+void CullAndCompact(uint3 id : SV_DispatchThreadID)
+{
+    uint chunkIndex = id.x;
+    if (chunkIndex >= (uint)_ChunkCount)
+        return;
+
+    ChunkData chunk = _Chunks[chunkIndex];
+    float3 center = chunk.center;
+    float3 extents = chunk.extents;
+
+    if (_MaxDrawDistanceSquared > 0.0)
+    {
+        float3 closest = clamp(_CameraPosition, center - extents, center + extents);
+        float3 delta = closest - _CameraPosition;
+        if (dot(delta, delta) > _MaxDrawDistanceSquared)
+            return;
+    }
+
+    if (!IsAABBVisible(center, extents))
+        return;
+
+    int firstRange = chunk.firstRange;
+    int rangeCount = chunk.rangeCount;
+    int endRange = firstRange + rangeCount;
+
+    for (int rangeIndex = firstRange; rangeIndex < endRange; rangeIndex++)
+    {
+        RangeData range = _Ranges[rangeIndex];
+        if (range.materialIndex != _MaterialIndex)
+            continue;
+
+        uint endInstance = (uint)(range.startInstance + range.instanceCount);
+        for (uint instanceIndex = (uint)range.startInstance; instanceIndex < endInstance; instanceIndex++)
+            _VisibleInstanceIndices.Append(instanceIndex);
+    }
+}

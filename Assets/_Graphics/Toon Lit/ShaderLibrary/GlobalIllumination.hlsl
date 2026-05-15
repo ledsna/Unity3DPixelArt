@@ -1,0 +1,406 @@
+#ifndef UNIVERSAL_GLOBAL_ILLUMINATION_INCLUDED
+#define UNIVERSAL_GLOBAL_ILLUMINATION_INCLUDED
+
+#include "Packages/com.unity.render-pipelines.core/ShaderLibrary/EntityLighting.hlsl"
+#include "Packages/com.unity.render-pipelines.core/ShaderLibrary/ImageBasedLighting.hlsl"
+#include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/RealtimeLights.hlsl"
+
+#define AMBIENT_PROBE_BUFFER 0
+#include "Packages/com.unity.render-pipelines.core/ShaderLibrary/AmbientProbe.hlsl"
+
+TEXTURE2D(_SSRReflectionTexture);
+SAMPLER(sampler_SSRReflectionTexture);
+
+#if defined(PROBE_VOLUMES_L1) || defined(PROBE_VOLUMES_L2)
+#include "Packages/com.unity.render-pipelines.core/Runtime/Lighting/ProbeVolume/ProbeVolume.hlsl"
+#endif
+#if USE_CLUSTER_LIGHT_LOOP
+#include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Packing.hlsl"
+#endif
+
+#if !defined(_MIXED_LIGHTING_SUBTRACTIVE) && defined(LIGHTMAP_SHADOW_MIXING) && !defined(SHADOWS_SHADOWMASK)
+    #define _MIXED_LIGHTING_SUBTRACTIVE
+#endif
+
+half3 SampleSHVertex(half3 normalWS)
+{
+#if defined(EVALUATE_SH_VERTEX)
+    return EvaluateAmbientProbeSRGB(normalWS);
+#elif defined(EVALUATE_SH_MIXED)
+    return SHEvalLinearL2(normalWS, unity_SHBr, unity_SHBg, unity_SHBb, unity_SHC);
+#endif
+
+    return half3(0.0, 0.0, 0.0);
+}
+
+half3 SampleSHPixel(half3 L2Term, half3 normalWS)
+{
+#if defined(EVALUATE_SH_VERTEX)
+    return L2Term;
+#elif defined(EVALUATE_SH_MIXED)
+    half3 res = L2Term + SHEvalLinearL0L1(normalWS, unity_SHAr, unity_SHAg, unity_SHAb);
+#ifdef UNITY_COLORSPACE_GAMMA
+    res = LinearToSRGB(res);
+#endif
+    return max(half3(0, 0, 0), res);
+#endif
+
+    return EvaluateAmbientProbeSRGB(normalWS);
+}
+
+#if (defined(PROBE_VOLUMES_L1) || defined(PROBE_VOLUMES_L2))
+half3 SampleProbeVolumeVertex(in float3 absolutePositionWS, in float3 normalWS, in float3 viewDir, out float4 probeOcclusion)
+{
+    probeOcclusion = 1.0;
+
+#if defined(EVALUATE_SH_VERTEX) || defined(EVALUATE_SH_MIXED)
+    half3 bakedGI;
+    float2 positionSS = float2(0, 0);
+    if (_EnableProbeVolumes)
+    {
+        EvaluateAdaptiveProbeVolume(absolutePositionWS, normalWS, viewDir, positionSS, GetMeshRenderingLayer(), bakedGI, probeOcclusion);
+    }
+    else
+    {
+        bakedGI = EvaluateAmbientProbe(normalWS);
+    }
+#ifdef UNITY_COLORSPACE_GAMMA
+    bakedGI = LinearToSRGB(bakedGI);
+#endif
+    return bakedGI;
+#else
+    return half3(0, 0, 0);
+#endif
+}
+
+half3 SampleProbeVolumePixel(in half3 vertexValue, in float3 absolutePositionWS, in float3 normalWS, in float3 viewDir, in float2 positionSS, in float4 vertexProbeOcclusion, out float4 probeOcclusion)
+{
+    probeOcclusion = 1.0;
+
+#if defined(EVALUATE_SH_VERTEX) || defined(EVALUATE_SH_MIXED)
+    probeOcclusion = vertexProbeOcclusion;
+    return vertexValue;
+#elif defined(PROBE_VOLUMES_L1) || defined(PROBE_VOLUMES_L2)
+    half3 bakedGI;
+    if (_EnableProbeVolumes)
+    {
+        EvaluateAdaptiveProbeVolume(absolutePositionWS, normalWS, viewDir, positionSS, GetMeshRenderingLayer(), bakedGI, probeOcclusion);
+    }
+    else
+    {
+        bakedGI = EvaluateAmbientProbe(normalWS);
+    }
+#ifdef UNITY_COLORSPACE_GAMMA
+        bakedGI = LinearToSRGB(bakedGI);
+#endif
+    return bakedGI;
+#else
+    return half3(0, 0, 0);
+#endif
+}
+
+half3 SampleProbeVolumePixel(in half3 vertexValue, in float3 absolutePositionWS, in float3 normalWS, in float3 viewDir, in float2 positionSS)
+{
+    float4 unusedProbeOcclusion = 0;
+    return SampleProbeVolumePixel(vertexValue, absolutePositionWS, normalWS, viewDir, positionSS, unusedProbeOcclusion, unusedProbeOcclusion);
+}
+#endif
+
+half3 SampleProbeSHVertex(in float3 absolutePositionWS, in float3 normalWS, in float3 viewDir, out float4 probeOcclusion)
+{
+    probeOcclusion = 1.0;
+
+#if (defined(PROBE_VOLUMES_L1) || defined(PROBE_VOLUMES_L2))
+    return SampleProbeVolumeVertex(absolutePositionWS, normalWS, viewDir, probeOcclusion);
+#else
+    return SampleSHVertex(normalWS);
+#endif
+}
+
+half3 SampleProbeSHVertex(in float3 absolutePositionWS, in float3 normalWS, in float3 viewDir)
+{
+    float4 unusedProbeOcclusion = 0;
+    return SampleProbeSHVertex(absolutePositionWS, normalWS, viewDir, unusedProbeOcclusion);
+}
+
+#if defined(UNITY_DOTS_INSTANCING_ENABLED) && !defined(USE_LEGACY_LIGHTMAPS)
+#define LIGHTMAP_NAME unity_Lightmaps
+#define LIGHTMAP_INDIRECTION_NAME unity_LightmapsInd
+#define LIGHTMAP_SAMPLER_NAME samplerunity_Lightmaps
+#define LIGHTMAP_SAMPLE_EXTRA_ARGS staticLightmapUV, unity_LightmapIndex.x
+#else
+#define LIGHTMAP_NAME unity_Lightmap
+#define LIGHTMAP_INDIRECTION_NAME unity_LightmapInd
+#define LIGHTMAP_SAMPLER_NAME samplerunity_Lightmap
+#define LIGHTMAP_SAMPLE_EXTRA_ARGS staticLightmapUV
+#endif
+
+half3 SampleLightmap(float2 staticLightmapUV, float2 dynamicLightmapUV, half3 normalWS)
+{
+    half4 transformCoords = half4(1, 1, 0, 0);
+
+    float3 diffuseLighting = 0;
+
+#if defined(LIGHTMAP_ON) && defined(DIRLIGHTMAP_COMBINED)
+    diffuseLighting = SampleDirectionalLightmap(TEXTURE2D_LIGHTMAP_ARGS(LIGHTMAP_NAME, LIGHTMAP_SAMPLER_NAME),
+        TEXTURE2D_LIGHTMAP_ARGS(LIGHTMAP_INDIRECTION_NAME, LIGHTMAP_SAMPLER_NAME),
+        LIGHTMAP_SAMPLE_EXTRA_ARGS, transformCoords, normalWS, true);
+#elif defined(LIGHTMAP_ON)
+    diffuseLighting = SampleSingleLightmap(TEXTURE2D_LIGHTMAP_ARGS(LIGHTMAP_NAME, LIGHTMAP_SAMPLER_NAME), LIGHTMAP_SAMPLE_EXTRA_ARGS, transformCoords, true);
+#endif
+
+#if defined(DYNAMICLIGHTMAP_ON) && defined(DIRLIGHTMAP_COMBINED)
+    diffuseLighting += SampleDirectionalLightmap(TEXTURE2D_ARGS(unity_DynamicLightmap, samplerunity_DynamicLightmap),
+        TEXTURE2D_ARGS(unity_DynamicDirectionality, samplerunity_DynamicLightmap),
+         dynamicLightmapUV, transformCoords, normalWS, false);
+#elif defined(DYNAMICLIGHTMAP_ON)
+    diffuseLighting += SampleSingleLightmap(TEXTURE2D_ARGS(unity_DynamicLightmap, samplerunity_DynamicLightmap),
+         dynamicLightmapUV, transformCoords, false);
+#endif
+
+    return diffuseLighting;
+}
+
+half3 SampleLightmap(float2 staticLightmapUV, half3 normalWS)
+{
+    float2 dummyDynamicLightmapUV = float2(0,0);
+    half3 result = SampleLightmap(staticLightmapUV, dummyDynamicLightmapUV, normalWS);
+    return result;
+}
+
+#if defined(LIGHTMAP_ON) && defined(DYNAMICLIGHTMAP_ON)
+#define SAMPLE_GI(staticLmName, dynamicLmName, shName, normalWSName) SampleLightmap(staticLmName, dynamicLmName, normalWSName)
+#elif defined(DYNAMICLIGHTMAP_ON)
+#define SAMPLE_GI(staticLmName, dynamicLmName, shName, normalWSName) SampleLightmap(0, dynamicLmName, normalWSName)
+#elif defined(LIGHTMAP_ON)
+#define SAMPLE_GI(staticLmName, shName, normalWSName) SampleLightmap(staticLmName, 0, normalWSName)
+#elif defined(PROBE_VOLUMES_L1) || defined(PROBE_VOLUMES_L2)
+#ifdef USE_APV_PROBE_OCCLUSION
+    #define SAMPLE_GI(shName, absolutePositionWS, normalWS, viewDir, positionSS, vertexProbeOcclusion, probeOcclusion) SampleProbeVolumePixel(shName, absolutePositionWS, normalWS, viewDir, positionSS, vertexProbeOcclusion, probeOcclusion)
+#else
+    #define SAMPLE_GI(shName, absolutePositionWS, normalWS, viewDir, positionSS, vertexProbeOcclusion, probeOcclusion) SampleProbeVolumePixel(shName, absolutePositionWS, normalWS, viewDir, positionSS)
+#endif
+#else
+#define SAMPLE_GI(staticLmName, shName, normalWSName) SampleSHPixel(shName, normalWSName)
+#endif
+
+half3 BoxProjectedCubemapDirection(half3 reflectionWS, float3 positionWS, float4 cubemapPositionWS, float4 boxMin, float4 boxMax)
+{
+    if (cubemapPositionWS.w > 0.0f)
+    {
+        float3 boxMinMax = (reflectionWS > 0.0f) ? boxMax.xyz : boxMin.xyz;
+        half3 rbMinMax = half3(boxMinMax - positionWS) / reflectionWS;
+
+        half fa = half(min(min(rbMinMax.x, rbMinMax.y), rbMinMax.z));
+
+        half3 worldPos = half3(positionWS - cubemapPositionWS.xyz);
+
+        half3 result = worldPos + reflectionWS * fa;
+        return result;
+    }
+    else
+    {
+        return reflectionWS;
+    }
+}
+
+float CalculateProbeWeight(float3 positionWS, float4 probeBoxMin, float4 probeBoxMax)
+{
+    float blendDistance = probeBoxMax.w;
+    float3 weightDir = min(positionWS - probeBoxMin.xyz, probeBoxMax.xyz - positionWS) / blendDistance;
+    return saturate(min(weightDir.x, min(weightDir.y, weightDir.z)));
+}
+
+half CalculateProbeVolumeSqrMagnitude(float4 probeBoxMin, float4 probeBoxMax)
+{
+    half3 maxToMin = half3(probeBoxMax.xyz - probeBoxMin.xyz);
+    return dot(maxToMin, maxToMin);
+}
+
+half3 CalculateIrradianceFromReflectionProbes(half3 reflectVector, float3 positionWS, half perceptualRoughness, float2 normalizedScreenSpaceUV)
+{
+    half3 irradiance = half3(0.0h, 0.0h, 0.0h);
+    half mip = PerceptualRoughnessToMipmapLevel(perceptualRoughness);
+#if USE_CLUSTER_LIGHT_LOOP && CLUSTER_HAS_REFLECTION_PROBES
+    float totalWeight = 0.0f;
+    uint probeIndex;
+    ClusterIterator it = ClusterInit(normalizedScreenSpaceUV, positionWS, 1);
+    [loop] while (ClusterNext(it, probeIndex) && totalWeight < 0.99f)
+    {
+        probeIndex -= URP_FP_PROBES_BEGIN;
+
+        float weight = CalculateProbeWeight(positionWS, urp_ReflProbes_BoxMin[probeIndex], urp_ReflProbes_BoxMax[probeIndex]);
+        weight = min(weight, 1.0f - totalWeight);
+
+        half3 sampleVector = reflectVector;
+#ifdef _REFLECTION_PROBE_BOX_PROJECTION
+        sampleVector = BoxProjectedCubemapDirection(reflectVector, positionWS, urp_ReflProbes_ProbePosition[probeIndex], urp_ReflProbes_BoxMin[probeIndex], urp_ReflProbes_BoxMax[probeIndex]);
+#endif
+
+        uint maxMip = (uint)abs(urp_ReflProbes_ProbePosition[probeIndex].w) - 1;
+        half probeMip = min(mip, maxMip);
+        float2 uv = saturate(PackNormalOctQuadEncode(sampleVector) * 0.5 + 0.5);
+
+        float mip0 = floor(probeMip);
+        float mip1 = mip0 + 1;
+        float mipBlend = probeMip - mip0;
+        float4 scaleOffset0 = urp_ReflProbes_MipScaleOffset[probeIndex * 7 + (uint)mip0];
+        float4 scaleOffset1 = urp_ReflProbes_MipScaleOffset[probeIndex * 7 + (uint)mip1];
+
+        half3 irradiance0 = half4(SAMPLE_TEXTURE2D_LOD(urp_ReflProbes_Atlas, sampler_LinearClamp, uv * scaleOffset0.xy + scaleOffset0.zw, 0.0)).rgb;
+        half3 irradiance1 = half4(SAMPLE_TEXTURE2D_LOD(urp_ReflProbes_Atlas, sampler_LinearClamp, uv * scaleOffset1.xy + scaleOffset1.zw, 0.0)).rgb;
+        irradiance += weight * lerp(irradiance0, irradiance1, mipBlend);
+        totalWeight += weight;
+    }
+#else
+    half probe0Volume = CalculateProbeVolumeSqrMagnitude(unity_SpecCube0_BoxMin, unity_SpecCube0_BoxMax);
+    half probe1Volume = CalculateProbeVolumeSqrMagnitude(unity_SpecCube1_BoxMin, unity_SpecCube1_BoxMax);
+
+    half volumeDiff = probe0Volume - probe1Volume;
+    float importanceSign = unity_SpecCube1_BoxMin.w;
+
+    bool probe0Dominant = importanceSign > 0.0f || (importanceSign == 0.0f && volumeDiff < -0.0001h);
+    bool probe1Dominant = importanceSign < 0.0f || (importanceSign == 0.0f && volumeDiff > 0.0001h);
+
+    float desiredWeightProbe0 = CalculateProbeWeight(positionWS, unity_SpecCube0_BoxMin, unity_SpecCube0_BoxMax);
+    float desiredWeightProbe1 = CalculateProbeWeight(positionWS, unity_SpecCube1_BoxMin, unity_SpecCube1_BoxMax);
+
+    float weightProbe0 = probe1Dominant ? min(desiredWeightProbe0, 1.0f - desiredWeightProbe1) : desiredWeightProbe0;
+    float weightProbe1 = probe0Dominant ? min(desiredWeightProbe1, 1.0f - desiredWeightProbe0) : desiredWeightProbe1;
+
+    float totalWeight = weightProbe0 + weightProbe1;
+
+    weightProbe0 /= max(totalWeight, 1.0f);
+    weightProbe1 /= max(totalWeight, 1.0f);
+
+    if (weightProbe0 > 0.01f)
+    {
+        half3 reflectVector0 = reflectVector;
+#ifdef _REFLECTION_PROBE_BOX_PROJECTION
+        reflectVector0 = BoxProjectedCubemapDirection(reflectVector, positionWS, unity_SpecCube0_ProbePosition, unity_SpecCube0_BoxMin, unity_SpecCube0_BoxMax);
+#endif
+
+        half4 encodedIrradiance = half4(SAMPLE_TEXTURECUBE_LOD(unity_SpecCube0, samplerunity_SpecCube0, reflectVector0, mip));
+
+        irradiance += weightProbe0 * DecodeHDREnvironment(encodedIrradiance, unity_SpecCube0_HDR);
+    }
+
+    if (weightProbe1 > 0.01f)
+    {
+        half3 reflectVector1 = reflectVector;
+#ifdef _REFLECTION_PROBE_BOX_PROJECTION
+        reflectVector1 = BoxProjectedCubemapDirection(reflectVector, positionWS, unity_SpecCube1_ProbePosition, unity_SpecCube1_BoxMin, unity_SpecCube1_BoxMax);
+#endif
+        half4 encodedIrradiance = half4(SAMPLE_TEXTURECUBE_LOD(unity_SpecCube1, samplerunity_SpecCube1, reflectVector1, mip));
+
+        irradiance += weightProbe1 * DecodeHDREnvironment(encodedIrradiance, unity_SpecCube1_HDR);
+    }
+#endif
+
+    if (totalWeight < 0.99f)
+    {
+        half4 encodedIrradiance = half4(SAMPLE_TEXTURECUBE_LOD(_GlossyEnvironmentCubeMap, sampler_GlossyEnvironmentCubeMap, reflectVector, mip));
+
+        irradiance += (1.0f - totalWeight) * DecodeHDREnvironment(encodedIrradiance, _GlossyEnvironmentCubeMap_HDR);
+    }
+
+    return irradiance;
+}
+
+half3 GlossyEnvironmentReflection(half3 reflectVector, float3 positionWS, half perceptualRoughness, half occlusion, float2 normalizedScreenSpaceUV)
+{
+    half3 irradiance;
+
+#if !defined(_ENVIRONMENTREFLECTIONS_OFF)
+#if defined(_REFLECTION_PROBE_BLENDING)
+    irradiance = CalculateIrradianceFromReflectionProbes(reflectVector, positionWS, perceptualRoughness, normalizedScreenSpaceUV);
+#else
+#ifdef _REFLECTION_PROBE_BOX_PROJECTION
+    reflectVector = BoxProjectedCubemapDirection(reflectVector, positionWS, unity_SpecCube0_ProbePosition, unity_SpecCube0_BoxMin, unity_SpecCube0_BoxMax);
+#endif
+    half mip = PerceptualRoughnessToMipmapLevel(perceptualRoughness);
+    half4 encodedIrradiance = half4(SAMPLE_TEXTURECUBE_LOD(unity_SpecCube0, samplerunity_SpecCube0, reflectVector, mip));
+
+    irradiance = DecodeHDREnvironment(encodedIrradiance, unity_SpecCube0_HDR);
+#endif
+
+    half4 ssrColor = SAMPLE_TEXTURE2D_LOD(_SSRReflectionTexture, sampler_LinearClamp, normalizedScreenSpaceUV, 0);
+    irradiance = lerp(irradiance, ssrColor.rgb, ssrColor.a);
+
+#else
+    irradiance = _GlossyEnvironmentColor.rgb;
+#endif
+
+    return irradiance * occlusion;
+}
+
+#if !USE_CLUSTER_LIGHT_LOOP
+half3 GlossyEnvironmentReflection(half3 reflectVector, float3 positionWS, half perceptualRoughness, half occlusion)
+{
+    return GlossyEnvironmentReflection(reflectVector, positionWS, perceptualRoughness, occlusion, float2(0.0f, 0.0f));
+}
+#endif
+
+half3 GlossyEnvironmentReflection(half3 reflectVector, half perceptualRoughness, half occlusion)
+{
+#if !defined(_ENVIRONMENTREFLECTIONS_OFF)
+    half3 irradiance;
+    half mip = PerceptualRoughnessToMipmapLevel(perceptualRoughness);
+    half4 encodedIrradiance = half4(SAMPLE_TEXTURECUBE_LOD(unity_SpecCube0, samplerunity_SpecCube0, reflectVector, mip));
+
+    irradiance = DecodeHDREnvironment(encodedIrradiance, unity_SpecCube0_HDR);
+
+    return irradiance * occlusion;
+#else
+
+    return _GlossyEnvironmentColor.rgb * occlusion;
+#endif
+}
+
+half3 SubtractDirectMainLightFromLightmap(Light mainLight, half3 normalWS, half3 bakedGI)
+{
+    half shadowStrength = GetMainLightShadowStrength();
+    half contributionTerm = saturate(dot(mainLight.direction, normalWS));
+    half3 lambert = mainLight.color * contributionTerm;
+    half3 estimatedLightContributionMaskedByInverseOfShadow = lambert * (1.0 - mainLight.shadowAttenuation);
+    half3 subtractedLightmap = bakedGI - estimatedLightContributionMaskedByInverseOfShadow;
+
+    half3 realtimeShadow = max(subtractedLightmap, _SubtractiveShadowColor.xyz);
+    realtimeShadow = lerp(bakedGI, realtimeShadow, shadowStrength);
+
+    return min(bakedGI, realtimeShadow);
+}
+
+half3 GlobalIllumination(BRDFData brdfData,
+    half3 directSpecular, half occlusion, float3 positionWS,
+    half3 normalWS, half3 viewDirectionWS, float2 normalizedScreenSpaceUV)
+{
+    half3 reflectVector = reflect(-viewDirectionWS, normalWS);
+    reflectVector = QuantizeDirectionSpherical(reflectVector, _ReflectionSteps, _ReflectionSteps);
+    half NoV = Quantize(_FresnelSteps, (saturate(dot(normalWS, viewDirectionWS))));
+    half fresnelTerm = Pow4(1.0 - NoV);
+
+    half3 indirectSpecular = GlossyEnvironmentReflection(reflectVector, positionWS, brdfData.perceptualRoughness, 1.0h, normalizedScreenSpaceUV);
+    
+    half3 c = directSpecular;
+    
+    c += indirectSpecular * EnvironmentBRDFSpecular(brdfData, fresnelTerm);
+    
+    half3 color = c;
+    
+    if (IsOnlyAOLightingFeatureEnabled())
+    {
+        color = half3(1,1,1);
+    }
+
+    return color * occlusion;
+}
+
+void MixRealtimeAndBakedGI(inout Light light, half3 normalWS, inout half3 bakedGI)
+{
+#if defined(LIGHTMAP_ON) && defined(_MIXED_LIGHTING_SUBTRACTIVE)
+    bakedGI = SubtractDirectMainLightFromLightmap(light, normalWS, bakedGI);
+#endif
+}
+
+#endif
